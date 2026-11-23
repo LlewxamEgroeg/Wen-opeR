@@ -1,0 +1,4 @@
+import type { UpdateInitiativeApi } from "wasp/server/api";
+import { HttpError } from "wasp/server";
+
+export const updateInitiativeApi: UpdateInitiativeApi<{ id: string; name?: string; description?: string; targetDate?: string | null; startDate?: string | null; status?: string }, any> = async (args, context) => { if (!context.user) throw new HttpError(401); const { updateInitiative } = await import("../../services/operations"); return updateInitiative({ id: args.id, name: args.name, description: args.description, targetDate: args.targetDate, startDate: args.startDate, status: args.status }, context); };

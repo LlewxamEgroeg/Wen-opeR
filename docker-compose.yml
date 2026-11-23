@@ -1,0 +1,182 @@
+# Great Spring Solutions - Coolify Docker Compose
+# Deploy with: coolify deploy --compose docker-compose.yml
+# Or locally: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # PostgreSQL Database
+  # =============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: gss-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-great_spring_solutions}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-great_spring_solutions}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - gss-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+  # =============================================================================
+  # Redis (for sessions, caching, PgBoss job queue)
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: gss-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - gss-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
+  # =============================================================================
+  # Great Spring Solutions Application
+  # =============================================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        NODE_ENV: production
+    container_name: gss-app
+    restart: unless-stopped
+    environment:
+      # Application
+      NODE_ENV: production
+      WASP_VERSION: ^0.26
+      
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-great_spring_solutions}
+      
+      # Server
+      WASP_SERVER_URL: ${WASP_SERVER_URL:-http://localhost:3001}
+      WASP_WEB_CLIENT_URL: ${WASP_WEB_CLIENT_URL:-http://localhost:3000}
+      PORT: 3001
+      
+      # JWT
+      JWT_SECRET: ${JWT_SECRET}
+      
+      # Email (Resend)
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USERNAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      
+      # OAuth
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      
+      # Webhooks
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET}
+      FIGMA_WEBHOOK_SECRET: ${FIGMA_WEBHOOK_SECRET}
+      VERCEL_WEBHOOK_SECRET: ${VERCEL_WEBHOOK_SECRET}
+      LINEAR_WEBHOOK_SECRET: ${LINEAR_WEBHOOK_SECRET}
+      JIRA_WEBHOOK_SECRET: ${JIRA_WEBHOOK_SECRET}
+      
+      # PgBoss
+      PG_BOSS_NEW_OPTIONS: '{"connectionString":"postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-great_spring_solutions}","archiveCompletedAfterSeconds":86400,"deleteAfterDays":30,"maintenanceIntervalMinutes":5}'
+      
+    ports:
+      - "3000:3000"   # Client (Vite dev server in production serves static files)
+      - "3001:3001"   # Server (API + WebSocket)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - gss-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    # Run migrations on startup (optional - can be done via separate job)
+    # command: sh -c "npx prisma migrate deploy && node .wasp/out/server/index.js"
+
+  # =============================================================================
+  # Database Migration Job (runs once before app starts)
+  # =============================================================================
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    container_name: gss-migrate
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-great_spring_solutions}
+      NODE_ENV: production
+    command: >
+      sh -c "npx prisma migrate deploy && echo 'Migration complete'"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - gss-network
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  gss-network:
+    driver: bridge
+    name: gss-network
